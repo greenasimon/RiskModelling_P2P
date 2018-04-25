@@ -4,6 +4,10 @@ from sklearn import preprocessing
 import numpy as np
 from keras.models import Sequential
 from keras.layers import Dense, Activation
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.decomposition import PCA
+from matplotlib import pyplot as plt
+from sklearn.preprocessing import StandardScaler
 
 # COMMAND ----------
 
@@ -13,26 +17,35 @@ filePath1 = '/FileStore/tables/LoanstatsDefaultInnerjoin.csv'
 loanstats = spark.read.option("header","true"). option("inferSchema","true").csv(filePath1)
 #move to pandas dataframe
 pd_loanstats = loanstats.toPandas() 
+pd_loanstats = pd_loanstats.drop_duplicates(['LOAN_ID'])
 
 # COMMAND ----------
 
 ##########################################################Data Preprocessing##############################################################################
 #1. LOAN_ID will be in index for the data
-indexedStats = pd_loanstats.set_index('LOAN_ID')
+#indexedStats = pd_loanstats.set_index('LOAN_ID')
+indexedStats = pd_loanstats.drop_duplicates(['LOAN_ID'])
 #2.PBAL_BEG_PERIOD id the principal amount borrowed. Renaming the column.
 indexedStats.rename(columns= {'PBAL_BEG_PERIOD':'PBal_Beg'},inplace = True)
 #3.Month - First payment month - Not required for probability of Default.We have Issue date already! Hence, Dropping the column.
 indexedStats.drop('MONTH',axis =1, inplace = True)
 #4.InterestRate = Required column in required format. Nothing to do here.
-
-# COMMAND ----------
-
 #5.IssuedDate - For simplicity, we will remove the month string to get the issued year and label encode data for each year.
 indexedStats['IssuedYear'] = indexedStats['IssuedDate'].str.replace(r'[^0-9]','')
 indexedStats.drop('IssuedDate', axis = 1, inplace = True)
-lb_IY = preprocessing.LabelEncoder()
-indexedStats['IY_code'] = lb_IY.fit_transform(indexedStats['IssuedYear']) #encoding years
-indexedStats[['IssuedYear','IY_code']].head()
+
+# COMMAND ----------
+
+pd_pca = pd_loanstats['LOAN_ID']
+print(pd_pca.shape)
+pd_pca.head()
+
+# COMMAND ----------
+
+lb_IY = LabelBinarizer()
+lb_results = lb_IY.fit_transform(indexedStats['IssuedYear'])
+pd_pca = pd.concat([pd_pca,pd.DataFrame(lb_results, columns=lb_IY.classes_)],axis =1)
+pd_pca.head()
 
 # COMMAND ----------
 
@@ -43,26 +56,19 @@ indexedStats.head()
 
 # COMMAND ----------
 
-#8 State - This part is a bit tricky since we have so many categories here! One method is to see number of statewise defaults and decide
-StatewiseDefault = indexedStats.query("Final_Stat == 'Charged Off' or Final_Stat =='Default'").groupby(['State'])['State'].count()
-StDefaultGrp1 = [key for key in StatewiseDefault.index if StatewiseDefault[key] < 2000]
-StDefaultGrp2 = [key for key in StatewiseDefault.index if StatewiseDefault[key] > 2000 and StatewiseDefault[key] < 5000]
-StDefaultGrp3 = [key for key in StatewiseDefault.index if StatewiseDefault[key] > 5000 and StatewiseDefault[key] < 10000]
-StDefaultGrp4 = [key for key in StatewiseDefault.index if StatewiseDefault[key] > 10000 and StatewiseDefault[key] < 15000]
-indexedStats['StateUpdated'] = indexedStats['State'].replace(StDefaultGrp1,'A1')
-indexedStats['StateUpdated'] = indexedStats['StateUpdated'].replace(StDefaultGrp2,'A2')
-indexedStats['StateUpdated'] = indexedStats['StateUpdated'].replace(StDefaultGrp3,'A3')
-indexedStats['StateUpdated'] = indexedStats['StateUpdated'].replace(StDefaultGrp4,'A4')
-lb_StU = preprocessing.LabelEncoder() # Replacing labels for State Groups
-indexedStats['StU_code'] = lb_StU.fit_transform(indexedStats['StateUpdated'])
-indexedStats[['StateUpdated','StU_code']].head()
+#8 State - Categorical variable with a lot of levels. Using one hot encoding and adding to PCA dataframe
+lb_States = LabelBinarizer()
+lb_Stresults = lb_States.fit_transform(indexedStats['State'])
+pd_pca = pd.concat([pd_pca,pd.DataFrame(lb_Stresults, columns=lb_States.classes_)],axis =1)
+pd_pca.head()
 
 # COMMAND ----------
 
-#9 HomeOwnership - Requires Label Encoding
-lb_HO = preprocessing.LabelEncoder()
-indexedStats['HO_code'] = lb_StU.fit_transform(indexedStats['HomeOwnership'])
-indexedStats[['HomeOwnership','HO_code']].head()
+#9 HomeOwnership - Requires one hot encoding and adding to PCA dataframe
+lb_HO = LabelBinarizer()
+lb_HOresults = lb_HO.fit_transform(indexedStats['HomeOwnership'])
+pd_pca = pd.concat([pd_pca,pd.DataFrame(lb_HOresults, columns=lb_HO.classes_)],axis =1)
+pd_pca.head()
 
 # COMMAND ----------
 
@@ -88,15 +94,11 @@ indexedStats.drop(['DQ2yrs','MonthsSinceDQ','PublicRec','MonthsSinceLastRec'], a
 
 # COMMAND ----------
 
-#21 EmploymentLength - similar to 'State' variable. Need to look at the default numbers
-EmpLengthwiseDefault = indexedStats.query("Final_Stat == 'Charged Off' or Final_Stat =='Default'").groupby(['EmploymentLength'])['EmploymentLength'].count()
-#based on the numbers categories will be '1 year or less', '2-3 years','4-9 years','10+ years'. Missing values will be in '1 year or less'
-indexedStats['EmpLengthUpdated'] = indexedStats['EmploymentLength'].replace(['1 year','< 1 year','n/a'],'1 year or less')
-indexedStats['EmpLengthUpdated'] = indexedStats['EmpLengthUpdated'].replace(['2 years','3 years'],'2-3 years')
-indexedStats['EmpLengthUpdated'] = indexedStats['EmpLengthUpdated'].replace(['4 years','5 years','6 years','7 years','8 years','9 years'],'4-9 years')
-lb_EmpU = preprocessing.LabelEncoder() # Replacing labels for EmploymentLength Groups
-indexedStats['EmpU_code'] = lb_EmpU.fit_transform(indexedStats['EmpLengthUpdated'])
-indexedStats[['EmpLengthUpdated','EmpU_code']].head()
+#21 EmploymentLength - One hot encoding and add to PCA
+lb_Emplen = LabelBinarizer() # Replacing labels for EmploymentLength
+lb_Emplenresults = lb_Emplen.fit_transform(indexedStats['EmploymentLength'])
+pd_pca = pd.concat([pd_pca,pd.DataFrame(lb_Emplenresults, columns=lb_Emplen.classes_)],axis =1)
+pd_pca.head()
 
 # COMMAND ----------
 
@@ -122,49 +124,104 @@ indexedStats.drop(['Last_FICO_BAND','VINTAGE','RECEIVED_D','PBAL_END_PERIOD','Fi
 
 # COMMAND ----------
 
+#adding y variable to PCA
+pd_pca = pd.concat([pd_pca, pd_loanstats['Final_Stat']],axis =1)
+pd_pca.head()
+
+# COMMAND ----------
+
 # Y variable - 'Final_Stat'
 AvailableYs = indexedStats.groupby(['Final_Stat'])['Final_Stat'].count()
 #AvailableYs = [ Charged Off, Default, Fully Paid, Issued]
 #Charged Off, Default => Default, 'Issued' not required. So will drop those rows.
 indexedStats = indexedStats[indexedStats['Final_Stat'] != 'Issued']
+pd_pca = pd_pca[pd_pca['Final_Stat'] != 'Issued']
 indexedStats['Final_Stat'].replace('Charged Off','Default', inplace = True)
+pd_pca['Final_Stat'].replace('Charged Off','Default', inplace = True)
 lb_DefaultStatus = preprocessing.LabelEncoder() # Replacing labels 
 indexedStats['DefaultStatus'] = lb_termU.fit_transform(indexedStats['Final_Stat'])
 indexedStats[['Final_Stat','DefaultStatus']].head()
 
 # COMMAND ----------
 
+lb_Default = preprocessing.LabelEncoder() # Replacing labels 
+pd_pca['Default'] = lb_Default.fit_transform(pd_pca['Final_Stat'])
+pd_pca[['Final_Stat','Default']].head()
+pd_pca.drop(['Final_Stat'],axis = 1,inplace = True)
+
+
+# COMMAND ----------
+
+#################Principal Component Analysis######################################################
+X = pd_pca.drop(['Default'],axis = 1)
+indexedX = X.set_index('LOAN_ID')
+pca = PCA(n_components = 5)
+principalComponents = pca.fit_transform(indexedX.values)
+principalDf = pd.DataFrame(data = principalComponents)
+
+# COMMAND ----------
+
+print(principalDf.shape)
+print(indexedStats.shape)
+
+# COMMAND ----------
+
 #Drop all the old related columns and keep the new category coded columns for prediction
-CleanedData = indexedStats.drop(['Final_Stat','APPL_FICO_BAND','termUpdated','term','EmpLengthUpdated','EmploymentLength',
-                                 'HomeOwnership','StateUpdated','State','IssuedYear'], axis = 1)
+CleanedData = indexedStats.drop(['Final_Stat','APPL_FICO_BAND','termUpdated','term','EmploymentLength',
+                                 'HomeOwnership','State','IssuedYear'], axis = 1)
 CleanedData.head()
 
 # COMMAND ----------
 
+A = CleanedData.reset_index()
+B = principalDf
 print(CleanedData.shape)
-print(CleanedData.corr().round(2))
-print(CleanedData.describe().T)
+print(principalDf.shape)
+print(A.shape)
+FinalDf = pd.concat([B,A],axis =1)
+print(FinalDf.shape)
 
 # COMMAND ----------
 
-CleanedDataA = CleanedData[CleanedData["DefaultStatus"] == 0]
-CleanedDataB = CleanedData[CleanedData["DefaultStatus"] == 1] 
-ab1 = CleanedDataA.mean().T.round(2)
-ab2 = CleanedDataB.mean().T.round(2)
+FinalDf = FinalDf.set_index(['LOAN_ID'])
+FinalDf.drop(['MonthlyAmt'],axis = 1, inplace = True)#high correlation with another variable
+FinalDf.head()
+
+# COMMAND ----------
+
+print(FinalDf.shape)
+print(FinalDf.corr().round(2))
+
+# COMMAND ----------
+
+print(FinalDf.describe().T)
+
+# COMMAND ----------
+
+FinalDfA = FinalDf[FinalDf["DefaultStatus"] == 0]
+FinalDfB = FinalDf[FinalDf["DefaultStatus"] == 1] 
+ab1 = FinalDfA.mean().T.round(2)
+ab2 = FinalDfB.mean().T.round(2)
 print(pd.concat([ab1,ab2],axis =1 ))
 
 # COMMAND ----------
 
+FinalDf.shape
+
+# COMMAND ----------
+
 ##########################Split the data into input and output variables
-inputX = CleanedData.values[:,0:17]
-inputY = CleanedData.values[:,17]
+inputX = FinalDf.values[:,0:18]
+inputY = FinalDf.values[:,18]
+# Standardizing the features
+inputX = StandardScaler().fit_transform(inputX)
 print(inputX)
 print(inputY)
 
 # COMMAND ----------
 
 print(inputX[0])
-print(CleanedData.values[0])
+print(FinalDf.values[0])
 
 # COMMAND ----------
 
@@ -172,10 +229,15 @@ print(CleanedData.values[0])
 
 # COMMAND ----------
 
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(inputX, inputY, test_size=0.25, random_state=0)
+
+# COMMAND ----------
+
 #################################################NEURAL NETWORK###########################################################
 modelNeural = Sequential()
-modelNeural.add(Dense(10, input_dim=17, activation='relu'))
-modelNeural.add(Dense(10, activation='relu'))
+modelNeural.add(Dense(20, input_dim=18, activation='relu'))
+modelNeural.add(Dense(20, activation='relu'))
 modelNeural.add(Dense(1, activation='sigmoid'))
 # Compile model
 modelNeural.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
@@ -183,9 +245,9 @@ modelNeural.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accu
 # COMMAND ----------
 
 # Fit the model
-modelNeural.fit(inputX, inputY, epochs=100, batch_size=1000)
+modelNeural.fit(X_train, y_train, epochs=100, batch_size=1000)
 # evaluate the model
-scores = modelNeural.evaluate(inputX, inputY)
+scores = modelNeural.evaluate(X_test, y_test)
 print("\n%s: %.2f%%" % (modelNeural.metrics_names[1], scores[1]*100))
 
 # COMMAND ----------
@@ -196,16 +258,15 @@ from sklearn.linear_model import LogisticRegression
 import statsmodels.api as sm
 from sklearn.linear_model import LogisticRegression
 from sklearn import metrics
-from sklearn.model_selection import train_test_split
 
 # COMMAND ----------
 
-logreg = LogisticRegression()
-rfe = RFE(logreg, 10) #10 will be the number of features to be selected
-rfe = rfe.fit(inputX, inputY )
-print(rfe.support_)
-print(rfe.ranking_)
-#or maybe i dont need to reduce it now! i will use all 17 columns
+#logreg = LogisticRegression()
+#rfe = RFE(logreg, 10) #10 will be the number of features to be selected
+#rfe = rfe.fit(inputX, inputY )
+#print(rfe.support_)
+#print(rfe.ranking_)
+#or maybe i dont need to reduce it now! i will use all 41 columns
 
 # COMMAND ----------
 
@@ -215,14 +276,13 @@ print(result.summary())
 
 # COMMAND ----------
 
-X_train, X_test, y_train, y_test = train_test_split(inputX, inputY, test_size=0.3, random_state=0)
 logreg = LogisticRegression()
 logreg.fit(X_train, y_train)
 
 # COMMAND ----------
 
 y_pred = logreg.predict(X_test)
-print('Accuracy of logistic regression classifier on test set: {:.2f}'.format(logreg.score(X_test, y_test)))
+print('Accuracy of logistic regression classifier on test set: {:.3f}'.format(logreg.score(X_test, y_test)*100))
 
 # COMMAND ----------
 
@@ -232,7 +292,21 @@ kfold = model_selection.KFold(n_splits=10, random_state=7)
 modelCV = LogisticRegression()
 scoring = 'accuracy'
 results = model_selection.cross_val_score(modelCV, X_train, y_train, cv=kfold, scoring=scoring)
-print("10-fold cross validation average accuracy: %.3f" % (results.mean()))
+print("10-fold cross validation average accuracy: %.3f" % (results.mean()*100))
+
+# COMMAND ----------
+
+############################################RandomForest############################################################
+# Import the model we are using
+from sklearn.ensemble import RandomForestClassifier
+# Instantiate model with 1000 decision trees
+rf = RandomForestClassifier(n_estimators = 100,min_samples_split = 100,min_samples_leaf=100, random_state = 42)
+# Train the model on training data
+rf.fit(X_train, y_train);
+
+# COMMAND ----------
+
+print('Accuracy of random forest classifier on test set: {:.3f}'.format(rf.score(X_test, y_test)*100))
 
 # COMMAND ----------
 
